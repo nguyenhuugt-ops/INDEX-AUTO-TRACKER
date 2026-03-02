@@ -125,9 +125,17 @@ df["US Spot ETF Net Inflow (USDm)"] = np.nan  # raw USD millions from Farside
 
 
 today_str = datetime.datetime.now().strftime('%d/%m/%Y')
+yesterday_str = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%d/%m/%Y')
+
 today_idx = df.index[df['Date_str'] == today_str].tolist()
+yesterday_idx = df.index[df['Date_str'] == yesterday_str].tolist()
+
 if today_idx:
     today_idx = today_idx[0]
+if yesterday_idx:
+    yesterday_idx = yesterday_idx[0]
+
+if today_idx is not None:
     
     # 2. VCB Exchange Rate - try XML first, fallback to webgia.com
     try:
@@ -165,7 +173,8 @@ if today_idx:
     # 3. SBV VNIBOR
     try:
         url = "https://sbv.gov.vn/webcenter/portal/vi/menu/trangchu/tk/lshdlnh"
-        response = requests.get(url, verify=False, timeout=10)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, verify=False, timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         # Tìm ngày áp dụng
@@ -223,6 +232,7 @@ if today_idx:
 
 
     # SELENIUM for Fireant and Farside ETF
+    driver = None
     try:
         chrome_options = Options()
         chrome_options.add_argument("--headless")
@@ -248,11 +258,11 @@ if today_idx:
                 elements = driver.find_elements(By.XPATH, "//div[contains(@class,'text') and contains(text(),'GT Mua-Bán')]/following-sibling::div[1]")
                 if not elements:
                     elements = driver.find_elements(By.XPATH, "//*[contains(text(),'GT Mua-Bán')]/following::*[1]")
-                if elements:
+                if elements and yesterday_idx is not None:
                     val_text = elements[0].text.replace('tỷ', '').replace(',', '').replace('+', '').strip()
                     if val_text:
-                        df.at[today_idx, "KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = float(val_text)
-                        print(f"Fireant GT Mua-Bán: {val_text}")
+                        df.at[yesterday_idx, "KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = float(val_text)
+                        print(f"Fireant GT Mua-Bán (Yesterday): {val_text}")
             except Exception as e:
                 print(f"Fireant GT parse error: {e}")
         except Exception as e:
@@ -262,17 +272,21 @@ if today_idx:
         try:
             driver.get("https://farside.co.uk/btc/")
             time.sleep(3)
-            totals = driver.find_elements(By.XPATH, "//th[text()='Total']/ancestor::table//tr[last()]/td")
-            if totals:
+            # Improved XPATH: find the row containing "Total" specifically
+            totals = driver.find_elements(By.XPATH, "//tr[td[1][contains(translate(text(), 'TOTAL', 'total'), 'total')]]/td")
+            if totals and yesterday_idx is not None:
                 val = totals[-1].text.strip()
                 if val:
-                    df.at[today_idx, "US Spot ETF Net Inflow (USDm)"] = float(val.replace('$', '').replace(',', ''))
+                    df.at[yesterday_idx, "US Spot ETF Net Inflow (USDm)"] = float(val.replace('(', '-').replace(')', '').replace('$', '').replace(',', ''))
+                    print(f"Farside Total (Yesterday): {val}")
         except Exception as e:
             print(f"Farside error: {e}")
             
-        driver.quit()
     except Exception as e:
         print(f"Selenium setup error: {e}")
+    finally:
+        if driver:
+            driver.quit()
 
     # Note: Overrides applied at the end.
 
