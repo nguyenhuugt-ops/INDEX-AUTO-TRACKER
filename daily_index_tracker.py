@@ -73,7 +73,7 @@ get_yf_data("E1VFVN30.VN", "E1VFVN30 (VND)")
 # Hardcoded overrides for known yfinance data errors
 # (yfinance ^VIX sometimes returns wrong data - correct with real values)
 vix_overrides = {
-    '02/03/2026': 19.86,
+    '02/03/2026': 21.44,
 }
 for d_str, val in vix_overrides.items():
     matches = df.loc[df['Date_str'] == d_str]
@@ -128,12 +128,10 @@ today_str = datetime.datetime.now().strftime('%d/%m/%Y')
 yesterday_str = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%d/%m/%Y')
 
 today_idx = df.index[df['Date_str'] == today_str].tolist()
-yesterday_idx = df.index[df['Date_str'] == yesterday_str].tolist()
+today_idx = today_idx[0] if today_idx else None
 
-if today_idx:
-    today_idx = today_idx[0]
-if yesterday_idx:
-    yesterday_idx = yesterday_idx[0]
+yesterday_idx = df.index[df['Date_str'] == yesterday_str].tolist()
+yesterday_idx = yesterday_idx[0] if yesterday_idx else None
 
 if today_idx is not None:
     
@@ -300,7 +298,7 @@ khoi_ngoai_final = {
     '10/02/2026': 761.05, '11/02/2026': 2086.43, '12/02/2026': 341.59,
     '13/02/2026': 196.00, '23/02/2026': -1107.00, '24/02/2026': 319.00,
     '25/02/2026': -1061.33, '26/02/2026': -3146.81, '27/02/2026': 182.00,
-    '02/03/2026': 766.50,
+    '02/03/2026': 767.00,
 }
 for d_str, val in khoi_ngoai_final.items():
     df.loc[df['Date_str'] == d_str, "KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = val
@@ -311,6 +309,7 @@ farside_final = {
     '17/02/2026': -104.9, '18/02/2026': -133.3, '19/02/2026': -165.8,
     '20/02/2026': 88.1,   '23/02/2026': -203.8, '24/02/2026': 257.7,
     '25/02/2026': 506.6,  '26/02/2026': 254.4,  '27/02/2026': -27.5,
+    '02/03/2026': 94.0,
 }
 for d_str, val in farside_final.items():
     df.loc[df['Date_str'] == d_str, "US Spot ETF Net Inflow (USDm)"] = val
