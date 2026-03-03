@@ -314,10 +314,16 @@ farside_final = {
 for d_str, val in farside_final.items():
     df.loc[df['Date_str'] == d_str, "US Spot ETF Net Inflow (USDm)"] = val
 
-# 3. VCB Exchange Rate Fix
+# 3. BTC Price Fix (Yahoo Finance missing Mar 2nd)
+df.loc[df['Date_str'] == '02/03/2026', "BTC"] = 65695.44
+
+# 4. USDT.D Fix (TradingView unstable)
+df.loc[df['Date_str'] == '02/03/2026', "USDT.D"] = 7.8784
+
+# 5. VCB Exchange Rate Fix
 df.loc[df['Date_str'] == '02/03/2026', "TỶ GIÁ USD bán ra VCB"] = 26289.0
 
-# 4. Other Historical Constants
+# 6. Other Historical Constants
 vnibor_final = {
     '09/02/2026': 9.19, '10/02/2026': 8.51, '11/02/2026': 4.28,
     '12/02/2026': 4.28, '13/02/2026': 4.28, '23/02/2026': 6.39,
