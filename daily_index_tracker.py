@@ -121,7 +121,6 @@ yesterday_idx = yesterday_idx_list[0] if yesterday_idx_list else None
 
 if today_idx is not None:
     # 1. BTC REAL-TIME FIX (Binance Backup)
-    # Nếu yfinance trả về NaN cho hôm nay (do chưa đóng nến), dùng Binance
     current_btc = df.at[today_idx, "BTC"]
     if pd.isna(current_btc) or current_btc == 0:
         binance_price = get_binance_btc_price()
@@ -169,7 +168,6 @@ if today_idx is not None:
         response = requests.get(url, verify=False, timeout=15, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Tìm ngày áp dụng trên web để map đúng ngày
         date_node = soup.find(string=re.compile("Ngày áp dụng"))
         sbv_date_str = None
         if date_node:
@@ -177,32 +175,26 @@ if today_idx is not None:
             if match:
                 sbv_date_str = match.group(1)
 
-        # Tìm dòng chứa lãi suất "Qua đêm" chuẩn xác
         rate_val = None
         row = soup.find('td', string=re.compile(r"Qua đêm", re.IGNORECASE))
         if row:
-            # Tìm ô giá trị (thường là ô kế tiếp trong cùng hàng tr)
             parent_tr = row.find_parent('tr')
-            cols = parent_tr.find_all('td')
-            # Lãi suất thường nằm ở cột thứ 2 hoặc 3
-            for col in cols:
+            cols_r = parent_tr.find_all('td')
+            for col in cols_r:
                 text = col.get_text().strip().replace(',', '.')
-                if re.match(r"^\d+(\.\d+)?$", text): # Là số
+                if re.match(r"^\d+(\.\d+)?$", text):
                     rate_val = float(text)
                     break
         
         if rate_val is not None:
             if sbv_date_str:
-                # Gán vào đúng ngày web hiển thị
                 match_idx = df.index[df['Date_str'] == sbv_date_str].tolist()
                 if match_idx:
                     df.at[match_idx[0], "VNIBOR qua đêm (%)"] = rate_val
                     print(f"SBV Rate ({sbv_date_str}): {rate_val}")
             else:
-                # Không tìm thấy ngày -> Gán tạm vào hôm nay
                 df.at[today_idx, "VNIBOR qua đêm (%)"] = rate_val
                 print(f"SBV Rate (Assumed Today): {rate_val}")
-
     except Exception as e:
         print(f"SBV Error: {e}")
 
@@ -216,12 +208,10 @@ if today_idx is not None:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        # A. KHỐI NGOẠI (Fireant)
         if yesterday_idx is not None:
             try:
                 driver.get("https://fireant.vn/dashboard")
                 time.sleep(5)
-                # Logic lấy số liệu (giữ nguyên hoặc tinh chỉnh nếu cần)
                 elements = driver.find_elements(By.XPATH, "//*[contains(text(),'GT Mua-Bán')]/following::*[1]")
                 if elements:
                     val_text = elements[0].text.replace('tỷ', '').replace(',', '').replace('+', '').strip()
@@ -231,27 +221,19 @@ if today_idx is not None:
             except Exception as e:
                 print(f"Fireant error: {e}")
 
-        # B. US SPOT ETF (Farside)
-        # Check cả hôm qua và hôm kia đề phòng lệch múi giờ
-        check_days = []
-        if yesterday_idx is not None: check_days.append(yesterday_idx)
-        
         try:
             driver.get("https://farside.co.uk/btc/")
             time.sleep(3)
-            # Tìm dòng TOTAL chuẩn xác
             totals = driver.find_elements(By.XPATH, "//tr[td[1][contains(translate(text(), 'TOTAL', 'total'), 'total')]]/td")
             if totals:
                 val_text = totals[-1].text.strip()
                 if val_text:
                     val_num = float(val_text.replace('(', '-').replace(')', '').replace('$', '').replace(',', ''))
-                    # Mặc định gán vào ngày hôm qua (T-1)
                     if yesterday_idx is not None:
                         df.at[yesterday_idx, "US Spot ETF Net Inflow (USDm)"] = val_num
                         print(f"Farside ETF: {val_num}")
         except Exception as e:
             print(f"Farside error: {e}")
-            
     except Exception as e:
         print(f"Selenium Error: {e}")
     finally:
@@ -260,36 +242,61 @@ if today_idx is not None:
 
 # --- OVERRIDES: CÁC GIÁ TRỊ CỐ ĐỊNH & HOTFIX ---
 
-# 1. Hotfix cho ngày hôm nay (04/03/2026) theo dữ liệu ngài yêu cầu
+# 1. Historical constants (MERGED BACK)
+history_overrides = {
+    # VN10Y Past
+    'VN10Y (%)': {
+        '20/02/2026': 4.249, '23/02/2026': 4.246, '24/02/2026': 4.251,
+        '25/02/2026': 4.251, '26/02/2026': 4.251, '27/02/2026': 4.256,
+        '28/02/2026': 4.254, '02/03/2026': 4.253,
+    },
+    # VNIBOR Past
+    'VNIBOR qua đêm (%)': {
+        '09/02/2026': 9.19, '10/02/2026': 8.51, '11/02/2026': 4.28,
+        '12/02/2026': 4.28, '13/02/2026': 4.28, '23/02/2026': 6.39,
+        '24/02/2026': 4.47, '25/02/2026': 4.47, '26/02/2026': 4.47,
+        '27/02/2026': 4.47, '28/02/2026': 4.47, '02/03/2026': 4.47,
+    },
+    # Foreign Flow (Khoi Ngoai)
+    'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': {
+        '10/02/2026': 761.05, '11/02/2026': 2086.43, '12/02/2026': 341.59,
+        '13/02/2026': 196.00, '23/02/2026': -1107.00, '24/02/2026': 319.00,
+        '25/02/2026': -1061.33, '26/02/2026': -3146.81, '27/02/2026': 182.00,
+        '02/03/2026': 767.00,
+    },
+    # US Spot ETF Inflow (USDm)
+    'US Spot ETF Net Inflow (USDm)': {
+        '11/02/2026': -276.3, '12/02/2026': -410.2, '13/02/2026': 15.1,
+        '17/02/2026': -104.9, '18/02/2026': -133.3, '19/02/2026': -165.8,
+        '20/02/2026': 88.1,   '23/02/2026': -203.8, '24/02/2026': 257.7,
+        '25/02/2026': 506.6,  '26/02/2026': 254.4,  '27/02/2026': -27.5,
+        '02/03/2026': 94.0,
+    }
+}
+
+for col, dates_dict in history_overrides.items():
+    for d_str, val in dates_dict.items():
+        # Only override if currently empty or from history dictionary
+        df.loc[df['Date_str'] == d_str, col] = val
+
+# 2. Specific fixes for March 2nd
+mar2_fixes = {'VIX': 21.44, 'BTC': 65695.44, 'TỶ GIÁ USD bán ra VCB': 26289.0, 'USDT.D': 7.8784}
+for col, val in mar2_fixes.items():
+    df.loc[df['Date_str'] == '02/03/2026', col] = val
+
+# 3. Hotfix for Today (04/03/2026)
 hotfix_today = {
-    'Date_str': '04/03/2026',
-    'VNIBOR qua đêm (%)': 4.47,     # Giả định giữ nguyên nếu SBV chưa update
-    'USDT.D': 7.9698,               # Dữ liệu sáng
-    'BTC': 68168.45,                # Giá sáng nay
-    'TỶ GIÁ USD bán ra VCB': 26298  # Giá sáng nay
+    'VNIBOR qua đêm (%)': 4.47,
+    'USDT.D': 7.9698,
+    'BTC': 68168.45,
+    'TỶ GIÁ USD bán ra VCB': 26298.0
 }
-
-# Áp dụng Hotfix
-idx_today_fix = df.index[df['Date_str'] == hotfix_today['Date_str']].tolist()
-if idx_today_fix:
-    idx = idx_today_fix[0]
+idx_today = df.index[df['Date_str'] == '04/03/2026'].tolist()
+if idx_today:
     for col, val in hotfix_today.items():
-        if col != 'Date_str':
-            # Chỉ ghi đè nếu đang rỗng hoặc NaN
-            current = df.at[idx, col]
-            if pd.isna(current) or current == "":
-                df.at[idx, col] = val
-
-# 2. Các dữ liệu lịch sử (Hardcode cũ)
-overrides = {
-    '02/03/2026': {'VIX': 21.44, 'VNIBOR qua đêm (%)': 4.47, 'BTC': 65695.44, 'TỶ GIÁ USD bán ra VCB': 26289},
-}
-for d_str, vals in overrides.items():
-    match = df.index[df['Date_str'] == d_str].tolist()
-    if match:
-        idx = match[0]
-        for c, v in vals.items():
-            df.at[idx, c] = v
+        current = df.at[idx_today[0], col]
+        if pd.isna(current) or current == "":
+            df.at[idx_today[0], col] = val
 
 # --- XỬ LÝ DỮ LIỆU CUỐI CÙNG ---
 
@@ -314,7 +321,7 @@ cols_order = ["Date", "DXY", "US10Y (%)", "VN10Y (%)", "VNIBOR qua đêm (%)",
 cols_order = [c for c in cols_order if c in df.columns]
 df = df[cols_order]
 
-# Transpose để xem theo Hàng ngang (Ngày là cột)
+# Transpose để xem theo Hàng ngang
 df_t = df.set_index("Date").T
 
 # --- XUẤT FILE ---
@@ -326,15 +333,21 @@ if not os.path.exists(output_dir):
     try:
         os.makedirs(output_dir)
     except:
-        output_dir = "." # Fallback to current folder
+        output_dir = "."
         
 output_path = os.path.join(output_dir, "Index tracking.xlsx")
 
 try:
-    df_t.to_excel(output_path)
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        df_t.to_excel(writer, sheet_name='Indices')
+        worksheet = writer.sheets['Indices']
+        worksheet.freeze_panes = 'B1' # Freeze Column A (Metric Names)
     print(f"\n[SUCCESS] Saved to: {output_path}")
 except Exception as e:
     print(f"\n[ERROR] Could not save Excel: {e}")
     temp_path = "Index_tracking_temp.xlsx"
-    df_t.to_excel(temp_path)
+    with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+        df_t.to_excel(writer, sheet_name='Indices')
+        worksheet = writer.sheets['Indices']
+        worksheet.freeze_panes = 'B1'
     print(f"[INFO] Saved to temp file instead: {temp_path}")
