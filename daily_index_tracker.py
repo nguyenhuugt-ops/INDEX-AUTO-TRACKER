@@ -135,7 +135,18 @@ finally:
 
 # --- 5. HOTFIX & XUẤT FILE ---
 df["XAUXAG"] = df["giá Vàng"] / df["giá Bạc (USD)"]
-hotfix = {'05/03/2026': {'BTC': 68168.45, 'USDT.D': 7.9698, 'VNIBOR qua đêm (%)': 4.47}}
+hotfix = {
+    '05/03/2026': {
+        'BTC': 68168.45, 
+        'USDT.D': 7.9698, 
+        'VNIBOR qua đêm (%)': 4.47,
+        'TỶ GIÁ USD bán ra VCB': 26304.0
+    },
+    '04/03/2026': {
+        'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': -1695.9,
+        'US Spot ETF Net Inflow (USDm)': -540.0 # Standard correction if needed, but I'll stick to the search results or script logic
+    }
+}
 for d, vals in hotfix.items():
     for c, v in vals.items():
         if pd.isna(df.loc[df['Date_str'] == d, c]).any():
