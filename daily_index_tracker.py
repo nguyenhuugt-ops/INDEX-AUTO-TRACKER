@@ -262,7 +262,7 @@ history_overrides = {
         '10/02/2026': 761.05, '11/02/2026': 2086.43, '12/02/2026': 341.59,
         '13/02/2026': 196.00, '23/02/2026': -1107.00, '24/02/2026': 319.00,
         '25/02/2026': -1061.33, '26/02/2026': -3146.81, '27/02/2026': 182.00,
-        '02/03/2026': 767.00,
+        '02/03/2026': 767.00, '03/03/2026': -125.4, '04/03/2026': -1695.9,
     },
     # US Spot ETF Inflow (USDm)
     'US Spot ETF Net Inflow (USDm)': {
@@ -270,7 +270,7 @@ history_overrides = {
         '17/02/2026': -104.9, '18/02/2026': -133.3, '19/02/2026': -165.8,
         '20/02/2026': 88.1,   '23/02/2026': -203.8, '24/02/2026': 257.7,
         '25/02/2026': 506.6,  '26/02/2026': 254.4,  '27/02/2026': -27.5,
-        '02/03/2026': 94.0,
+        '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,
     }
 }
 
@@ -279,19 +279,22 @@ for col, dates_dict in history_overrides.items():
         # Only override if currently empty or from history dictionary
         df.loc[df['Date_str'] == d_str, col] = val
 
-# 2. Specific fixes for March 2nd
+# 2. Specific fixes for March 2nd - 4th
 mar2_fixes = {'VIX': 21.44, 'BTC': 65695.44, 'TỶ GIÁ USD bán ra VCB': 26289.0, 'USDT.D': 7.8784}
 for col, val in mar2_fixes.items():
     df.loc[df['Date_str'] == '02/03/2026', col] = val
 
-# 3. Hotfix for Today (04/03/2026)
+df.loc[df['Date_str'] == '04/03/2026', 'BTC'] = 72710.58
+df.loc[df['Date_str'] == '04/03/2026', 'USDT.D'] = 7.575
+
+# 3. Hotfix for Today (05/03/2026)
 hotfix_today = {
     'VNIBOR qua đêm (%)': 4.47,
     'USDT.D': 7.9698,
     'BTC': 68168.45,
     'TỶ GIÁ USD bán ra VCB': 26298.0
 }
-idx_today = df.index[df['Date_str'] == '04/03/2026'].tolist()
+idx_today = df.index[df['Date_str'] == '05/03/2026'].tolist()
 if idx_today:
     for col, val in hotfix_today.items():
         current = df.at[idx_today[0], col]
