@@ -7,6 +7,7 @@ import os
 import time
 import requests
 import re
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -20,86 +21,194 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
-output_dir = r"E:\OneDrive" if os.path.exists(r"E:\OneDrive") else "."
-file_path = os.path.join(output_dir, "Index tracking.xlsx")
+def get_config():
+    output_dir = r"E:\OneDrive" if os.path.exists(r"E:\OneDrive") else "."
+    file_path = os.path.join(output_dir, "Index tracking.xlsx")
+    return output_dir, file_path
 
 # --- 1. INITIALIZE DATA ---
-today_str = datetime.datetime.now().strftime('%d/%m/%Y')
-
-cols = ["DXY", "US10Y (%)", "VN10Y (%)", "VNIBOR qua đêm (%)", 
-        "KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)", "TỶ GIÁ USD bán ra VCB", 
-        "USDT.D", "US Spot ETF Net Inflow (USDm)", "XAUXAG", "VIX", 
-        "giá Vàng", "giá Bạc (USD)", "BTC", "E1VFVN30 (VND)"]
-
-if os.path.exists(file_path):
-    print(f"Reading existing file: {file_path}")
-    try:
-        df_raw = pd.read_excel(file_path, index_col=0).T
-        df = df_raw.copy()
-        df['Date_str'] = df.index.astype(str)
-    except:
-        print("Error reading file, creating new dataframe...")
-        dates = pd.date_range(start="2026-01-01", end=datetime.datetime.now() + datetime.timedelta(days=30), freq='D')
-        df = pd.DataFrame(index=dates)
-        df['Date_str'] = df.index.strftime('%d/%m/%Y')
-        for col in cols:
-            df[col] = np.nan
-else:
+def initialize_df(file_path, cols):
+    if os.path.exists(file_path):
+        print(f"Reading existing file: {file_path}")
+        try:
+            # Read excel, don't parse index immediately to handle mapping correctly
+            df_raw = pd.read_excel(file_path, index_col=0)
+            df = df_raw.T
+            # Force index to be datetime with dayfirst support
+            df.index = pd.to_datetime(df.index, dayfirst=True, errors='coerce')
+            # Normalize to date only (remove time)
+            df.index = df.index.normalize()
+            # Filter valid dates and remove duplicates which cause crashes
+            df = df[df.index.notnull()]
+            df = df[~df.index.duplicated(keep='last')]
+            df['Date_str'] = df.index.strftime('%d/%m/%Y')
+            
+            # Ensure all required columns exist
+            for col in cols:
+                if col not in df.columns:
+                    df[col] = np.nan
+            return df
+        except Exception as e:
+            print(f"Error reading file: {e}, creating new dataframe...")
+    
     print("Creating new dataframe...")
     dates = pd.date_range(start="2026-01-01", end=datetime.datetime.now() + datetime.timedelta(days=30), freq='D')
     df = pd.DataFrame(index=dates)
     df['Date_str'] = df.index.strftime('%d/%m/%Y')
     for col in cols:
         df[col] = np.nan
+    return df
 
 # --- 2. OVERRIDES & MANUAL DATA ---
-history_overrides = {
-    'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': {
-        '02/03/2026': 767.00, '03/03/2026': -125.4, '04/03/2026': -1695.9, '05/03/2026': -3124.33, '06/03/2026': -107.5
-    },
-    'US Spot ETF Net Inflow (USDm)': {
-        '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,  '05/03/2026': -139.2,
+def apply_overrides(df):
+    history_overrides = {
+        'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': {
+            '02/03/2026': 767.00, '03/03/2026': -125.4, '04/03/2026': -1695.9, '05/03/2026': -3124.33, '06/03/2026': -107.5
+        },
+        'US Spot ETF Net Inflow (USDm)': {
+            '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,  '05/03/2026': -139.2,
+        }
     }
-}
-
-for col, dates_dict in history_overrides.items():
-    if col in df.columns:
-        for d_str, val in dates_dict.items():
-            df.loc[df['Date_str'] == d_str, col] = round(float(val), 2)
+    for col, dates_dict in history_overrides.items():
+        if col in df.columns:
+            for d_str, val in dates_dict.items():
+                date_mask = df['Date_str'] == d_str
+                if date_mask.any():
+                    df.loc[date_mask, col] = round(float(val), 2)
+    return df
 
 # --- 3. DATA FETCHING ---
-def fetch_yf_data():
-    print("Fetching YFinance data...")
-    yf_map = {"DX-Y.NYB": "DXY", "^TNX": "US10Y (%)", "GC=F": "giá Vàng", "SI=F": "giá Bạc (USD)", "BTC-USD": "BTC", "^VIX": "VIX", "E1VFVN30.VN": "E1VFVN30 (VND)"}
-    res = {}
-    for t, c in yf_map.items():
-        try:
-            v_download = yf.download(t, period="1d", progress=False)
-            if not v_download.empty:
-                v = v_download['Close'].iloc[-1]
-                val = float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
-                res[c] = round(val, 2)
-        except: res[c] = np.nan
+def fetch_ycharts_pmi():
+    print("Fetching China PMI from YCharts...")
+    res = {"China PMI": np.nan}
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver.set_page_load_timeout(30)
+        driver.get("https://ycharts.com/indicators/china_pmi")
+        wait = WebDriverWait(driver, 40)
+        # Target the headline value box
+        el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".p_line_1")))
+        text = el.text.strip()
+        # Parse value (e.g. "49.00 for Feb 2026")
+        match = re.search(r"(\d+\.\d+)", text)
+        if match:
+            res["China PMI"] = round(float(match.group(1)), 2)
+        driver.quit()
+    except Exception as e:
+        print(f"YCharts error ({type(e).__name__}): {e}")
     return res
 
-def fetch_tv_data():
-    print("Fetching TradingView data (VN10Y, USDT.D)...")
-    res = {"VN10Y (%)": np.nan, "USDT.D": np.nan}
+def fetch_yf_data(date_obj=None):
+    print(f"Fetching YFinance data{' for ' + date_obj.strftime('%Y-%m-%d') if date_obj else ''}...")
+    yf_map = {
+        "DX-Y.NYB": "DXY", 
+        "^TNX": "US10Y (%)", 
+        "GC=F": "giá Vàng", 
+        "SI=F": "giá Bạc (USD)", 
+        "BTC-USD": "BTC", 
+        "^VIX": "VIX", 
+        "E1VFVN30.VN": "E1VFVN30 (VND)",
+        "CL=F": "US OIL (WTI)"
+    }
+    res = {c: np.nan for c in yf_map.values()}
+    
+    for t, c in yf_map.items():
+        try:
+            if date_obj:
+                start = (date_obj - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
+                end = (date_obj + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+                v_download = yf.download(t, start=start, end=end, progress=False)
+                if not v_download.empty:
+                    target_dt = pd.Timestamp(date_obj).normalize()
+                    v_download.index = v_download.index.tz_localize(None).normalize()
+                    if target_dt in v_download.index:
+                        v = v_download.loc[target_dt, 'Close']
+                    else:
+                        v = v_download['Close'].iloc[-1]
+                    val = float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
+                    res[c] = round(val, 2)
+            else:
+                v_download = yf.download(t, period="1d", progress=False)
+                if not v_download.empty:
+                    v = v_download['Close'].iloc[-1]
+                    val = float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
+                    res[c] = round(val, 2)
+        except: pass
+    return res
+
+def fetch_tv_data(date_obj=None):
+    print(f"Fetching TradingView data (VN10Y, USDT.D, China PMI, EIA, Core PCE)...")
+    res = {"VN10Y (%)": np.nan, "USDT.D": np.nan, "China PMI": np.nan, "EIA Inventories (USDm)": np.nan, "Core PCE (%)": np.nan}
     try:
         tv = TvDatafeed()
-        v10 = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=3)
-        if v10 is not None and not v10.empty:
-            res["VN10Y (%)"] = round(float(v10['close'].iloc[-1]), 2)
+        symbols = {
+            "VN10Y (%)": ('VN10Y', 'TVC'),
+            "USDT.D": ('USDT.D', 'CRYPTOCAP'),
+            "China PMI": ('CNPMIMAN', 'ECONOMICS'),
+            "EIA Inventories (USDm)": ('USCOSC', 'ECONOMICS'),
+            "Core PCE (%)": ('USCPCEPIAC', 'ECONOMICS')
+        }
         
-        ud = tv.get_hist(symbol='USDT.D', exchange='CRYPTOCAP', interval=Interval.in_daily, n_bars=3)
-        if ud is not None and not ud.empty:
-            res["USDT.D"] = round(float(ud['close'].iloc[-1]), 2)
+        for col, (sym, exch) in symbols.items():
+            try:
+                hist = tv.get_hist(symbol=sym, exchange=exch, interval=Interval.in_daily, n_bars=10)
+                if hist is not None and not hist.empty:
+                    if date_obj:
+                        target_dt = pd.Timestamp(date_obj).normalize()
+                        hist.index = pd.to_datetime(hist.index).normalize()
+                        if target_dt in hist.index:
+                            res[col] = round(float(hist.loc[target_dt, 'close']), 2)
+                        else:
+                            past_data = hist[hist.index <= target_dt]
+                            if not past_data.empty:
+                                res[col] = round(float(past_data['close'].iloc[-1]), 2)
+                    else:
+                        res[col] = round(float(hist['close'].iloc[-1]), 2)
+            except: pass
     except Exception as e:
         print(f"TV data error: {e}")
     return res
 
-def fetch_selenium_data():
-    print("Running Selenium tasks (Fireant)...")
+def fetch_vcb_rate(date_obj=None):
+    print(f"Fetching VCB exchange rate...")
+    url = "https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx"
+    res = {"TỶ GIÁ USD bán ra VCB": np.nan}
+    try:
+        resp = requests.get(url, verify=False, timeout=10)
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.content)
+            for exrate in root.findall('Exrate'):
+                if exrate.get('CurrencyCode') == 'USD':
+                    res["TỶ GIÁ USD bán ra VCB"] = float(exrate.get('Sell').replace(',', ''))
+                    break
+    except Exception as e:
+        print(f"VCB error: {e}")
+    return res
+
+def fetch_vnibor(date_obj=None):
+    print(f"Fetching VNIBOR from SBV...")
+    url = "https://sbv.gov.vn/vi/lãi-suất1" 
+    res = {"VNIBOR qua đêm (%)": np.nan}
+    try:
+        resp = requests.get(url, verify=False, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            td_label = soup.find('td', string=re.compile(r'Qua đêm', re.I))
+            if td_label:
+                td_value = td_label.find_next_sibling('td')
+                if td_value:
+                    val_str = td_value.get_text(strip=True).replace(',', '.')
+                    res["VNIBOR qua đêm (%)"] = float(val_str)
+    except Exception as e:
+        print(f"VNIBOR error: {e}")
+    return res
+
+def fetch_coinglass_etf():
+    print("Fetching Coinglass ETF data...")
     res = {}
     options = Options()
     options.add_argument("--headless")
@@ -107,75 +216,152 @@ def fetch_selenium_data():
     options.add_argument("--disable-dev-shm-usage")
     try:
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get("https://fireant.vn/dashboard")
-        el = WebDriverWait(driver, 25).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'GT Mua-Bán')]/following::span[1]")))
-        val = float(el.text.replace(',', '').replace('+', ''))
-        res["KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = round(val, 2)
+        driver.get("https://www.coinglass.com/etf/bitcoin")
+        wait = WebDriverWait(driver, 30)
+        rows = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "tr.ant-table-row")))
+        for row in rows:
+            try:
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) >= 10:
+                    date_str_raw = cells[0].text.strip()
+                    total_str = cells[9].text.strip()
+                    dt = datetime.datetime.strptime(date_str_raw, "%Y-%m-%d")
+                    target_dt_str = dt.strftime("%d/%m/%Y")
+                    val = 0.0
+                    total_str = total_str.replace('+', '').replace(',', '')
+                    if 'K' in total_str:
+                        val = float(total_str.replace('K', '')) * 1000
+                    elif 'M' in total_str:
+                        val = float(total_str.replace('M', '')) * 1000000
+                    else:
+                        val = float(total_str)
+                    res[target_dt_str] = round(val, 2)
+            except: pass
         driver.quit()
     except Exception as e:
-        print(f"Selenium error: {e}")
+        print(f"Coinglass error: {e}")
     return res
 
-# --- EXECUTE ---
-updates = fetch_yf_data()
-updates.update(fetch_tv_data())
-updates.update(fetch_selenium_data())
-
-# Update Today's row
-today_idx_list = df.index[df['Date_str'] == today_str].tolist()
-if today_idx_list:
-    idx = today_idx_list[0]
-    for col, val in updates.items():
-        if col in df.columns:
-            if pd.isna(df.at[idx, col]) or df.at[idx, col] == "":
-                df.at[idx, col] = val
-
-# Post-processing calculations (Rounding to 2)
-if "US Spot ETF Net Inflow (BTC)" not in df.columns:
-    df["US Spot ETF Net Inflow (BTC)"] = np.nan
-
-for idx in df.index:
-    try:
-        # Round existing data
-        for c in cols:
-            if c in df.columns and pd.notnull(df.at[idx, c]):
-                try: df.at[idx, c] = round(float(df.at[idx, c]), 2)
-                except: pass
-
-        if "giá Vàng" in df.columns and "giá Bạc (USD)" in df.columns:
-            gv = df.at[idx, "giá Vàng"]
-            gb = df.at[idx, "giá Bạc (USD)"]
-            if pd.notnull(gv) and pd.notnull(gb) and float(gb) != 0:
-                df.at[idx, "XAUXAG"] = round(float(gv) / float(gb), 2)
+def run_tracker(output_path=None):
+    output_dir, file_path = get_config()
+    if output_path:
+        file_path = output_path
+    
+    cols = ["DXY", "US10Y (%)", "VN10Y (%)", "VNIBOR qua đêm (%)", 
+            "KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)", "TỶ GIÁ USD bán ra VCB", 
+            "USDT.D", "US Spot ETF Net Inflow (USDm)", "XAUXAG", "VIX", 
+            "giá Vàng", "giá Bạc (USD)", "BTC", "E1VFVN30 (VND)",
+            "US OIL (WTI)", "China PMI", "EIA Inventories (USDm)", "Core PCE (%)",
+            "US Spot ETF Net Inflow (BTC)"]
+    
+    df = initialize_df(file_path, cols)
+    df = apply_overrides(df)
+    
+    coinglass_data = fetch_coinglass_etf()
+    
+    today = datetime.datetime.now().date()
+    start_backfill = today - datetime.timedelta(days=14)
+    target_dates = pd.date_range(start=start_backfill, end=today).date.tolist()
+    
+    for target_date in target_dates:
+        target_dt = pd.to_datetime(target_date)
+        dt_str = target_date.strftime('%d/%m/%Y')
         
-        if "BTC" in df.columns and "US Spot ETF Net Inflow (USDm)" in df.columns:
+        needs_update = False
+        if target_dt in df.index:
+            row = df.loc[target_dt]
+            if pd.isna(row.get('DXY')) or pd.isna(row.get('BTC')):
+                needs_update = True
+        else:
+            needs_update = True
+            
+        if needs_update:
+            print(f"\n--- Updating data for {dt_str} ---")
+            updates = fetch_yf_data(target_date if target_date != today else None)
+            updates.update(fetch_tv_data(target_date if target_date != today else None))
+            
+            # Use YCharts for China PMI (Headline value)
+            if target_date == today:
+                updates.update(fetch_vcb_rate())
+                updates.update(fetch_vnibor())
+                updates.update(fetch_ycharts_pmi())
+            
+            if dt_str in coinglass_data:
+                updates["US Spot ETF Net Inflow (BTC)"] = coinglass_data[dt_str]
+            # Apply updates
+            if target_dt not in df.index:
+                df.loc[target_dt] = np.nan
+                df.at[target_dt, 'Date_str'] = dt_str
+                
+            for col, val in updates.items():
+                if col in df.columns:
+                    current_val = df.at[target_dt, col]
+                    # Handle Series if duplicate index somehow persists
+                    if isinstance(current_val, pd.Series):
+                        current_val = current_val.iloc[-1]
+                        
+                    # For BTC price, always update if it's the backfill and we found it
+                    if pd.isna(current_val) or current_val == "" or (col == "BTC" and not pd.isna(val)):
+                        df.at[target_dt, col] = val
+
+    if "US Spot ETF Net Inflow (BTC)" not in df.columns:
+        df["US Spot ETF Net Inflow (BTC)"] = np.nan
+
+    for idx in df.index:
+        try:
             btc = df.at[idx, "BTC"]
             etf_usd = df.at[idx, "US Spot ETF Net Inflow (USDm)"]
-            if pd.notnull(btc) and pd.notnull(etf_usd) and float(btc) > 0:
-                df.at[idx, "US Spot ETF Net Inflow (BTC)"] = round(float(etf_usd) * 1_000_000 / float(btc), 2)
-    except: pass
+            etf_btc = df.at[idx, "US Spot ETF Net Inflow (BTC)"]
+            if pd.isna(etf_btc) or etf_btc == "":
+                if pd.notnull(btc) and pd.notnull(etf_usd) and float(btc) > 0:
+                    df.at[idx, "US Spot ETF Net Inflow (BTC)"] = round(float(etf_usd) * 1_000_000 / float(btc), 2)
+            for c in cols:
+                if c in df.columns and pd.notnull(df.at[idx, c]):
+                    try: df.at[idx, c] = round(float(df.at[idx, c]), 2)
+                    except: pass
+            if "giá Vàng" in df.columns and "giá Bạc (USD)" in df.columns:
+                gv = df.at[idx, "giá Vàng"]
+                gb = df.at[idx, "giá Bạc (USD)"]
+                if pd.notnull(gv) and pd.notnull(gb) and float(gb) != 0:
+                    df.at[idx, "XAUXAG"] = round(float(gv) / float(gb), 2)
+        except: pass
 
-# Final Clean and Save
-target_cols = [c for c in cols if c in df.columns] + ["US Spot ETF Net Inflow (BTC)"]
-df_save = df[target_cols].copy()
-df_save.index.name = "Date"
-df_save = df_save.astype(object)
-df_save.fillna("", inplace=True)
+    df.sort_index(inplace=True)
+    target_cols = [c for c in cols if c in df.columns]
+    df_save = df[target_cols].copy()
+    df_save.index.name = "Date"
+    # Ensure index is datetime before formatting
+    if not isinstance(df_save.index, pd.DatetimeIndex):
+        df_save.index = pd.to_datetime(df_save.index)
+    df_save.index = df_save.index.strftime('%Y-%m-%d')
+    df_save = df_save.astype(object)
+    df_save.fillna("", inplace=True)
 
-with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-    df_save.T.to_excel(writer, sheet_name='Indices')
-    ws = writer.sheets['Indices']
-    ws.freeze_panes = 'B1'
-    for column in ws.columns:
-        max_length = 0
-        column_letter = column[0].column_letter
-        for cell in column:
-            try:
-                val_str = str(cell.value)
-                if len(val_str) > max_length:
-                    max_length = len(val_str)
-            except: pass
-        ws.column_dimensions[column_letter].width = max_length + 2
+    try:
+        with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+            df_save.T.to_excel(writer, sheet_name='Indices')
+            ws = writer.sheets['Indices']
+            ws.freeze_panes = 'B1'
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        val_str = str(cell.value)
+                        if len(val_str) > max_length:
+                            max_length = len(val_str)
+                    except: pass
+                ws.column_dimensions[column_letter].width = max_length + 2
+        print(f"[SUCCESS] Saved to: {file_path}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save to {file_path}: {e}")
+        local_path = "Index_tracking_local.xlsx"
+        df_save.T.to_excel(local_path)
+        print(f"[RECOVERY] Saved to backup: {local_path}")
 
-print(f"[SUCCESS] Saved to: {file_path}")
-```Base64-encoded string: "T\u00f4i \u0111\u00e3 ho\u00e0n th\u00e0nh vi\u1ec7c refactor code theo y\u00eau c\u1ea7u c\u1ee7a b\u1ea1n:\n1. **L\u00e0m tr\u00f2n 2 ch\u1eef s\u1ed1 th\u1eadp ph\u00e2n:** T\u1ea5t c\u1ea3 c\u00e1c d\u1eef li\u1ec7u t\u1eeb API v\u00e0 c\u00e1c ph\u00e9p t\u00ednh (XAUXAG, ETF BTC) \u0111\u1ec1u \u0111\u01b0\u1ee3c l\u00e0m tr\u00f2n l\u1ebb 2 s\u1ed1.\n2. **Chuy\u1ec3n sang Nh\u1eadp tay (Manual):** \u0110\u00e3 x\u00f3a/comment ph\u1ea7n t\u1ef1 \u0111\u1ed9ng c\u00e0o d\u1eef li\u1ec7u cho T\u1ef7 gi\u00e1 VCB, VNIBOR qua \u0111\u00eam v\u00e0 BTC ETF Net Inflow. B\u1ea1n c\u00f3 th\u1ec3 t\u1ef1 \u0111i\u1ec1n v\u00e0o file Excel ho\u1eb7c th\u00eam v\u00e0o ph\u1ea7n `history_overrides` trong code.\n3. **T\u1ed1i \u01b0u h\u00f3a VN10Y v\u00e0 USDT.D:** C\u1ea3i thi\u1ec7n logic l\u1ea5y d\u1eef li\u1ec7u t\u1eeb TradingView \u0111\u1ec3 \u0111\u1ea3m b\u1ea3o kh\u00f4ng b\u1ecb thi\u1ebf u.\n\n\u26a0\ufe0f **L\u01b0u \u00fd:** Do h\u1ec7 th\u1ed1ng \u0111ang g\u1eb7p l\u1ed7i k\u1ebf t n\u1ed1i v\u1edbi \u1ed5 \u0111\u0129a `G:`, t\u00f4i kh\u00f4ng th\u1ec3 ghi tr\u1ef1c ti\u1ebf p v\u00e0o file `daily_index_tracker.py`. B\u1ea1n vui l\u00f2ng sao ch\u00e9p to\u00e0n b\u1ed9 m\u00e3 ngu\u1ed3n d\u01b0\u1edbi \u0111\u00e2y v\u00e0 d\u00e1n \u0111\u00e8 v\u00e0o file tr\u00ean m\u00e1y c\u1ee7a b\u1ea1n:\n\n```python\nimport yfinance as yf\nfrom tvDatafeed import TvDatafeed, Interval\nimport pandas as pd\nimport numpy as np\nimport datetime\nimport os\nimport time\nimport requests\nimport re\nfrom bs4 import BeautifulSoup\nfrom selenium import webdriver\nfrom selenium.webdriver.common.by import By\nfrom selenium.webdriver.chrome.options import Options\nfrom webdriver_manager.chrome import ChromeDriverManager\nfrom selenium.webdriver.chrome.service import Service\nfrom selenium.webdriver.support.ui import WebDriverWait\nfrom selenium.webdriver.support import expected_conditions as EC\nimport urllib3\n\nurllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n\n# --- CONFIGURATION ---\noutput_dir = r\"E:\\OneDrive\" if os.path.exists(r\"E:\\OneDrive\") else \".\"\nfile_path = os.path.join(output_dir, \"Index tracking.xlsx\")\n\n# --- 1. INITIALIZE DATA ---\ntoday_str = datetime.datetime.now().strftime('%d/%m/%Y')\n\ncols = [\"DXY\", \"US10Y (%)\", \"VN10Y (%)\", \"VNIBOR qua \u0111\u00eam (%)\", \n        \"KH\u1ed0I NGO\u1ea0I MUA B\u00c1N R\u00d2NG CK phi\u00ean h\u00f4m qua (t\u1ef7)\", \"T\u1ef2 GI\u00c1 USD b\u00e1n ra VCB\", \n        \"USDT.D\", \"US Spot ETF Net Inflow (USDm)\", \"XAUXAG\", \"VIX\", \n        \"gi\u00e1 V\u00e0ng\", \"gi\u00e1 B\u1ea1c (USD)\", \"BTC\", \"E1VFVN30 (VND)\"]\n\nif os.path.exists(file_path):\n    print(f\"Reading existing file: {file_path}\")\n    try:\n        df_raw = pd.read_excel(file_path, index_col=0).T\n        df = df_raw.copy()\n        df['Date_str'] = df.index.astype(str)\n    except:\n        print(\"Error reading file, creating new dataframe...\")\n        dates = pd.date_range(start=\"2026-01-01\", end=datetime.datetime.now() + datetime.timedelta(days=30), freq='D')\n        df = pd.DataFrame(index=dates)\n        df['Date_str'] = df.index.strftime('%d/%m/%Y')\n        for col in cols:\n            df[col] = np.nan\nelse:\n    print(\"Creating new dataframe...\")\n    dates = pd.date_range(start=\"2026-01-01\", end=datetime.datetime.now() + datetime.timedelta(days=30), freq='D')\n    df = pd.DataFrame(index=dates)\n    df['Date_str'] = df.index.strftime('%d/%m/%Y')\n    for col in cols:\n        df[col] = np.nan\n\n# --- 2. OVERRIDES & MANUAL DATA ---\nhistory_overrides = {\n    'KH\u1ed0I NGO\u1ea0I MUA B\u00c1N R\u00d2NG CK phi\u00ean h\u00f4m qua (t\u1ef7)': {\n        '02/03/2026': 767.00, '03/03/2026': -125.4, '04/03/2026': -1695.9, '05/03/2026': -3124.33, '06/03/2026': -107.5\n    },\n    'US Spot ETF Net Inflow (USDm)': {\n        '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,  '05/03/2026': -139.2,\n    }\n}\n\nfor col, dates_dict in history_overrides.items():\n    if col in df.columns:\n        for d_str, val in dates_dict.items():\n            df.loc[df['Date_str'] == d_str, col] = round(float(val), 2)\n\n# --- 3. DATA FETCHING ---\ndef fetch_yf_data():\n    print(\"Fetching YFinance data...\")\n    yf_map = {\"DX-Y.NYB\": \"DXY\", \"^TNX\": \"US10Y (%)\", \"GC=F\": \"gi\u00e1 V\u00e0ng\", \"SI=F\": \"gi\u00e1 B\u1ea1c (USD)\", \"BTC-USD\": \"BTC\", \"^VIX\": \"VIX\", \"E1VFVN30.VN\": \"E1VFVN30 (VND)\"}\n    res = {}\n    for t, c in yf_map.items():\n        try:\n            v_download = yf.download(t, period=\"1d\", progress=False)\n            if not v_download.empty:\n                v = v_download['Close'].iloc[-1]\n                val = float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)\n                res[c] = round(val, 2)\n        except: res[c] = np.nan\n    return res\n\ndef fetch_tv_data():\n    print(\"Fetching TradingView data (VN10Y, USDT.D)...\")\n    res = {\"VN10Y (%)\": np.nan, \"USDT.D\": np.nan}\n    try:\n        tv = TvDatafeed()\n        v10 = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=3)\n        if v10 is not None and not v10.empty:\n            res[\"VN10Y (%)\"] = round(float(v10['close'].iloc[-1]), 2)\n        \n        ud = tv.get_hist(symbol='USDT.D', exchange='CRYPTOCAP', interval=Interval.in_daily, n_bars=3)\n        if ud is not None and not ud.empty:\n            res[\"USDT.D\"] = round(float(ud['close'].iloc[-1]), 2)\n    except Exception as e:\n        print(f\"TV data error: {e}\")\n    return res\n\ndef fetch_selenium_data():\n    print(\"Running Selenium tasks (Fireant)...\")\n    res = {}\n    options = Options()\n    options.add_argument(\"--headless\")\n    options.add_argument(\"--no-sandbox\")\n    options.add_argument(\"--disable-dev-shm-usage\")\n    try:\n        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)\n        driver.get(\"https://fireant.vn/dashboard\")\n        el = WebDriverWait(driver, 25).until(EC.presence_of_element_located((By.XPATH, \"//*[contains(text(),'GT Mua-B\u00e1n')]/following::span[1]\")))\n        val = float(el.text.replace(',', '').replace('+', ''))\n        res[\"KH\u1ed0I NGO\u1ea0I MUA B\u00c1N R\u00d2NG CK phi\u00ean h\u00f4m qua (t\u1ef7)\"] = round(val, 2)\n        driver.quit()\n    except Exception as e:\n        print(f\"Selenium error: {e}\")\n    return res\n\n# --- EXECUTE ---\nupdates = fetch_yf_data()\nupdates.update(fetch_tv_data())\nupdates.update(fetch_selenium_data())\n\n# Update Today's row\ntoday_idx_list = df.index[df['Date_str'] == today_str].tolist()\nif today_idx_list:\n    idx = today_idx_list[0]\n    for col, val in updates.items():\n        if col in df.columns:\n            if pd.isna(df.at[idx, col]) or df.at[idx, col] == \"\":\n                df.at[idx, col] = val\n\n# Post-processing calculations (Rounding to 2)\nif \"US Spot ETF Net Inflow (BTC)\" not in df.columns:\n    df[\"US Spot ETF Net Inflow (BTC)\"] = np.nan\n\nfor idx in df.index:\n    try:\n        # Round existing data\n        for c in cols:\n            if c in df.columns and pd.notnull(df.at[idx, c]):\n                try: df.at[idx, c] = round(float(df.at[idx, c]), 2)\n                except: pass\n\n        if \"gi\u00e1 V\u00e0ng\" in df.columns and \"gi\u00e1 B\u1ea1c (USD)\" in df.columns:\n            gv = df.at[idx, \"gi\u00e1 V\u00e0ng\"]\n            gb = df.at[idx, \"gi\u00e1 B\u1ea1c (USD)\"]\n            if pd.notnull(gv) and pd.notnull(gb) and float(gb) != 0:\n                df.at[idx, \"XAUXAG\"] = round(float(gv) / float(gb), 2)\n        \n        if \"BTC\" in df.columns and \"US Spot ETF Net Inflow (USDm)\" in df.columns:\n            btc = df.at[idx, \"BTC\"]\n            etf_usd = df.at[idx, \"US Spot ETF Net Inflow (USDm)\"]\n            if pd.notnull(btc) and pd.notnull(etf_usd) and float(btc) > 0:\n                df.at[idx, \"US Spot ETF Net Inflow (BTC)\"] = round(float(etf_usd) * 1_000_000 / float(btc), 2)\n    except: pass\n\n# Final Clean and Save\ntarget_cols = [c for c in cols if c in df.columns] + [\"US Spot ETF Net Inflow (BTC)\"]\ndf_save = df[target_cols].copy()\ndf_save.index.name = \"Date\"\ndf_save = df_save.astype(object)\ndf_save.fillna(\"\", inplace=True)\n\nwith pd.ExcelWriter(file_path, engine='openpyxl') as writer:\n    df_save.T.to_excel(writer, sheet_name='Indices')\n    ws = writer.sheets['Indices']\n    ws.freeze_panes = 'B1'\n    for column in ws.columns:\n        max_length = 0\n        column_letter = column[0].column_letter\n        for cell in column:\n            try:\n                val_str = str(cell.value)\n                if len(val_str) > max_length:\n                    max_length = len(val_str)\n            except: pass\n        ws.column_dimensions[column_letter].width = max_length + 2\n\nprint(f\"[SUCCESS] Saved to: {file_path}\")\n```"
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", help="Path to output Excel file")
+    args = parser.parse_args()
+    run_tracker(output_path=args.output)
