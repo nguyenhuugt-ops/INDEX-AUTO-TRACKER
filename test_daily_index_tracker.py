@@ -63,6 +63,21 @@ def test_initialize_df_deduplication(tmp_path):
     assert len(df) == 1
     assert df.loc["2026-03-09", "DXY"] == 105.0 # Keep last
 
+def test_initialize_df_column_deduplication(tmp_path):
+    file_path = tmp_path / "col_dupes.xlsx"
+    # Create dataframe with duplicated columns
+    df_init = pd.DataFrame([[100.0, 200.0]], columns=["DXY", "DXY"], index=["09/03/2026"])
+    df_init.index.name = "Date"
+    with pd.ExcelWriter(file_path) as writer:
+        df_init.T.to_excel(writer, sheet_name='Indices')
+    
+    df = daily_index_tracker.initialize_df(str(file_path), ["DXY", "BTC"])
+    # Should only have one DXY column
+    assert "DXY" in df.columns
+    # The deduplication uses keep='last', so value should be 200.0
+    assert df.loc["2026-03-09", "DXY"] == 200.0
+    assert "BTC" in df.columns
+
 @patch('daily_index_tracker.yf.download')
 def test_fetch_yf_data_success(mock_yf):
     mock_data = MagicMock()
@@ -93,17 +108,29 @@ def test_fetch_vnibor_success(mock_get):
     res = daily_index_tracker.fetch_vnibor()
     assert res["VNIBOR qua đêm (%)"] == 5.74
 
-@patch('daily_index_tracker.webdriver.Chrome')
-def test_fetch_ycharts_pmi_success(mock_chrome):
-    mock_driver = mock_chrome.return_value
-    mock_el = MagicMock()
-    mock_el.text = "49.00 for Feb 2026"
-    mock_driver.find_element.return_value = mock_el
-    # Mocking wait and expected_conditions is complex, so we just mock the final return
-    with patch('daily_index_tracker.WebDriverWait') as mock_wait:
-        mock_wait.return_value.until.return_value = mock_el
-        res = daily_index_tracker.fetch_ycharts_pmi()
-        assert res["China PMI"] == 49.0
+@patch('daily_index_tracker.requests.get')
+def test_fetch_china_pmi_success(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        'series': {'docs': [{'value': [48.5, 49.0]}]}
+    }
+    mock_get.return_value = mock_resp
+    
+    res = daily_index_tracker.fetch_china_pmi()
+    assert res["China PMI"] == 49.0
+
+@patch('daily_index_tracker.requests.get')
+def test_fetch_vndirect_foreign_success(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [
+        {'date': '2026-03-09', 'buyVal': 1000000000, 'sellVal': 500000000}
+    ]
+    mock_get.return_value = mock_resp
+    
+    res = daily_index_tracker.fetch_vndirect_foreign()
+    assert res["09/03/2026"] == 0.5
 
 def test_post_processing_etf_calc():
     df = pd.DataFrame({
@@ -123,11 +150,15 @@ def test_post_processing_etf_calc():
 @patch('daily_index_tracker.fetch_yf_data')
 @patch('daily_index_tracker.fetch_tv_data')
 @patch('daily_index_tracker.fetch_coinglass_etf')
+@patch('daily_index_tracker.fetch_vndirect_foreign')
+@patch('daily_index_tracker.fetch_china_pmi')
 @patch('daily_index_tracker.pd.ExcelWriter')
-def test_run_tracker_dry_run(mock_writer, mock_coinglass, mock_tv, mock_yf, tmp_path):
+def test_run_tracker_dry_run(mock_writer, mock_china, mock_vnd, mock_coinglass, mock_tv, mock_yf, tmp_path):
     mock_yf.return_value = {"DXY": 100.0}
     mock_tv.return_value = {"VN10Y (%)": 4.0}
     mock_coinglass.return_value = {"09/03/2026": 500.0}
+    mock_vnd.return_value = {"09/03/2026": 0.5}
+    mock_china.return_value = {"China PMI": 49.0}
     
     output = tmp_path / "final.xlsx"
     daily_index_tracker.run_tracker(output_path=str(output))

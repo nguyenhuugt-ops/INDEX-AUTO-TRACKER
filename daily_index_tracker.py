@@ -41,6 +41,10 @@ def initialize_df(file_path, cols):
             # Filter valid dates and remove duplicates which cause crashes
             df = df[df.index.notnull()]
             df = df[~df.index.duplicated(keep='last')]
+            
+            # Filter duplicate columns (indicator rows)
+            df = df.loc[:, ~df.columns.duplicated(keep='last')]
+            
             df['Date_str'] = df.index.strftime('%d/%m/%Y')
             
             # Ensure all required columns exist
@@ -62,9 +66,6 @@ def initialize_df(file_path, cols):
 # --- 2. OVERRIDES & MANUAL DATA ---
 def apply_overrides(df):
     history_overrides = {
-        'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': {
-            '02/03/2026': 767.00, '03/03/2026': -125.4, '04/03/2026': -1695.9, '05/03/2026': -3124.33, '06/03/2026': -107.5
-        },
         'US Spot ETF Net Inflow (USDm)': {
             '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,  '05/03/2026': -139.2,
         }
@@ -78,28 +79,40 @@ def apply_overrides(df):
     return df
 
 # --- 3. DATA FETCHING ---
-def fetch_ycharts_pmi():
-    print("Fetching China PMI from YCharts...")
+def fetch_china_pmi():
+    print("Fetching China PMI from DBnomics...")
     res = {"China PMI": np.nan}
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.set_page_load_timeout(30)
-        driver.get("https://ycharts.com/indicators/china_pmi")
-        wait = WebDriverWait(driver, 40)
-        # Target the headline value box
-        el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".p_line_1")))
-        text = el.text.strip()
-        # Parse value (e.g. "49.00 for Feb 2026")
-        match = re.search(r"(\d+\.\d+)", text)
-        if match:
-            res["China PMI"] = round(float(match.group(1)), 2)
-        driver.quit()
+        url = "https://api.db.nomics.world/v22/series/TradingEconomics/CHIPMIM?observations=1"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            val = data['series']['docs'][0]['value'][-1]
+            if val is not None:
+                res["China PMI"] = round(float(val), 2)
     except Exception as e:
-        print(f"YCharts error ({type(e).__name__}): {e}")
+        print(f"China PMI error: {e}")
+    return res
+
+def fetch_vndirect_foreign():
+    print("Fetching E1VFVN30 foreign net flow from Fireant...")
+    res = {}
+    url = "https://restv2.fireant.vn/symbols/E1VFVN30/historical-foreign?startDate=2026-02-01&endDate=2026-12-31"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://fireant.vn',
+        'Referer': 'https://fireant.vn/'
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data:
+                dt_str = datetime.datetime.strptime(item['date'][:10], '%Y-%m-%d').strftime('%d/%m/%Y')
+                net_val = item.get('buyVal', 0) - item.get('sellVal', 0)
+                res[dt_str] = round(net_val / 1e9, 2)
+    except Exception as e:
+        print(f"Fireant Error: {e}")
     return res
 
 def fetch_yf_data(date_obj=None):
@@ -142,13 +155,12 @@ def fetch_yf_data(date_obj=None):
 
 def fetch_tv_data(date_obj=None):
     print(f"Fetching TradingView data (VN10Y, USDT.D, China PMI, EIA, Core PCE)...")
-    res = {"VN10Y (%)": np.nan, "USDT.D": np.nan, "China PMI": np.nan, "EIA Inventories (USDm)": np.nan, "Core PCE (%)": np.nan}
+    res = {"VN10Y (%)": np.nan, "USDT.D": np.nan, "EIA Inventories (USDm)": np.nan, "Core PCE (%)": np.nan}
     try:
         tv = TvDatafeed()
         symbols = {
             "VN10Y (%)": ('VN10Y', 'TVC'),
             "USDT.D": ('USDT.D', 'CRYPTOCAP'),
-            "China PMI": ('CNPMIMAN', 'ECONOMICS'),
             "EIA Inventories (USDm)": ('USCOSC', 'ECONOMICS'),
             "Core PCE (%)": ('USCPCEPIAC', 'ECONOMICS')
         }
@@ -258,6 +270,7 @@ def run_tracker(output_path=None):
     df = apply_overrides(df)
     
     coinglass_data = fetch_coinglass_etf()
+    vnd_foreign = fetch_vndirect_foreign()
     
     today = datetime.datetime.now().date()
     start_backfill = today - datetime.timedelta(days=14)
@@ -280,14 +293,22 @@ def run_tracker(output_path=None):
             updates = fetch_yf_data(target_date if target_date != today else None)
             updates.update(fetch_tv_data(target_date if target_date != today else None))
             
-            # Use YCharts for China PMI (Headline value)
             if target_date == today:
                 updates.update(fetch_vcb_rate())
                 updates.update(fetch_vnibor())
-                updates.update(fetch_ycharts_pmi())
+                
+            # Use dbnomics for China PMI
+            if 'pmi_val' not in locals():
+                rpmi = fetch_china_pmi()
+                pmi_val = rpmi.get("China PMI", np.nan)
+            updates["China PMI"] = pmi_val
             
             if dt_str in coinglass_data:
                 updates["US Spot ETF Net Inflow (BTC)"] = coinglass_data[dt_str]
+                
+            if dt_str in vnd_foreign:
+                updates["KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = vnd_foreign[dt_str]
+                
             # Apply updates
             if target_dt not in df.index:
                 df.loc[target_dt] = np.nan
@@ -328,12 +349,20 @@ def run_tracker(output_path=None):
 
     df.sort_index(inplace=True)
     target_cols = [c for c in cols if c in df.columns]
+    
+    # Drop rows that are completely empty across target_cols (Deduplicate garbage future dates)
+    df.replace("", np.nan, inplace=True)
+    df.dropna(subset=target_cols, how='all', inplace=True)
+    
+    # Drop completely future dates which are artifacts of past Month-Day swap bugs
+    df = df[df.index <= pd.Timestamp(today)]
+    
     df_save = df[target_cols].copy()
     df_save.index.name = "Date"
     # Ensure index is datetime before formatting
     if not isinstance(df_save.index, pd.DatetimeIndex):
-        df_save.index = pd.to_datetime(df_save.index)
-    df_save.index = df_save.index.strftime('%Y-%m-%d')
+        df_save.index = pd.to_datetime(df_save.index, dayfirst=True)
+    df_save.index = df_save.index.strftime('%d/%m/%Y')
     df_save = df_save.astype(object)
     df_save.fillna("", inplace=True)
 
