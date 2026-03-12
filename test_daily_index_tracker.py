@@ -108,29 +108,19 @@ def test_fetch_vnibor_success(mock_get):
     res = daily_index_tracker.fetch_vnibor()
     assert res["VNIBOR qua đêm (%)"] == 5.74
 
-@patch('daily_index_tracker.requests.get')
-def test_fetch_china_pmi_success(mock_get):
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        'series': {'docs': [{'value': [48.5, 49.0]}]}
-    }
-    mock_get.return_value = mock_resp
+def test_apply_overrides_manual_fields():
+    # Test that manual fields from apply_overrides are correctly populated
+    test_date = pd.Timestamp("2026-03-11")
+    df_input = pd.DataFrame(index=[test_date], columns=["DXY", "China PMI", "Date_str"])
+    df_input["Date_str"] = "11/03/2026"
     
-    res = daily_index_tracker.fetch_china_pmi()
-    assert res["China PMI"] == 49.0
+    # Apply bank actual overrides from the script
+    df_output = daily_index_tracker.apply_overrides(df_input)
+    
+    # Verify that 'China PMI' for 11/03/2026 is populated
+    assert not pd.isna(df_output.at[test_date, "China PMI"])
+    assert df_output.at[test_date, "China PMI"] == 49.0 # Value from current script
 
-@patch('daily_index_tracker.requests.get')
-def test_fetch_vndirect_foreign_success(mock_get):
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = [
-        {'date': '2026-03-09', 'buyVal': 1000000000, 'sellVal': 500000000}
-    ]
-    mock_get.return_value = mock_resp
-    
-    res = daily_index_tracker.fetch_vndirect_foreign()
-    assert res["09/03/2026"] == 0.5
 
 def test_post_processing_etf_calc():
     df = pd.DataFrame({
@@ -149,16 +139,10 @@ def test_post_processing_etf_calc():
 
 @patch('daily_index_tracker.fetch_yf_data')
 @patch('daily_index_tracker.fetch_tv_data')
-@patch('daily_index_tracker.fetch_coinglass_etf')
-@patch('daily_index_tracker.fetch_vndirect_foreign')
-@patch('daily_index_tracker.fetch_china_pmi')
 @patch('daily_index_tracker.pd.ExcelWriter')
-def test_run_tracker_dry_run(mock_writer, mock_china, mock_vnd, mock_coinglass, mock_tv, mock_yf, tmp_path):
+def test_run_tracker_dry_run(mock_writer, mock_tv, mock_yf, tmp_path):
     mock_yf.return_value = {"DXY": 100.0}
     mock_tv.return_value = {"VN10Y (%)": 4.0}
-    mock_coinglass.return_value = {"09/03/2026": 500.0}
-    mock_vnd.return_value = {"09/03/2026": 0.5}
-    mock_china.return_value = {"China PMI": 49.0}
     
     output = tmp_path / "final.xlsx"
     daily_index_tracker.run_tracker(output_path=str(output))

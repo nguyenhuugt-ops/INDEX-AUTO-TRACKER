@@ -65,9 +65,18 @@ def initialize_df(file_path, cols):
 
 # --- 2. OVERRIDES & MANUAL DATA ---
 def apply_overrides(df):
+    # Manual data entry for specific indicators
+    # Add date (DD/MM/YYYY) and value here
     history_overrides = {
+        'China PMI': {
+            '11/03/2026': 49.0,
+        },
+        'KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)': {
+            '11/03/2026': -250.5,
+        },
         'US Spot ETF Net Inflow (USDm)': {
             '02/03/2026': 94.0,   '03/03/2026': 114.7,  '04/03/2026': 155.3,  '05/03/2026': -139.2,
+            '11/03/2026': 120.5,
         }
     }
     for col, dates_dict in history_overrides.items():
@@ -78,42 +87,30 @@ def apply_overrides(df):
                     df.loc[date_mask, col] = round(float(val), 2)
     return df
 
-# --- 3. DATA FETCHING ---
-def fetch_china_pmi():
-    print("Fetching China PMI from DBnomics...")
-    res = {"China PMI": np.nan}
-    try:
-        url = "https://api.db.nomics.world/v22/series/TradingEconomics/CHIPMIM?observations=1"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            val = data['series']['docs'][0]['value'][-1]
-            if val is not None:
-                res["China PMI"] = round(float(val), 2)
-    except Exception as e:
-        print(f"China PMI error: {e}")
-    return res
-
-def fetch_vndirect_foreign():
-    print("Fetching E1VFVN30 foreign net flow from Fireant...")
-    res = {}
-    url = "https://restv2.fireant.vn/symbols/E1VFVN30/historical-foreign?startDate=2026-02-01&endDate=2026-12-31"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Origin': 'https://fireant.vn',
-        'Referer': 'https://fireant.vn/'
-    }
+# --- 3. DATA FETCHING (Automated) ---
+def fetch_investing_vn10y():
+    print("Fetching VN10Y from Investing.com...")
+    url = "https://vn.investing.com/rates-bonds/vietnam-10-year-bond-yield"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
-            data = resp.json()
-            for item in data:
-                dt_str = datetime.datetime.strptime(item['date'][:10], '%Y-%m-%d').strftime('%d/%m/%Y')
-                net_val = item.get('buyVal', 0) - item.get('sellVal', 0)
-                res[dt_str] = round(net_val / 1e9, 2)
+            # Try multiple patterns for price
+            patterns = [
+                r'data-test="last-price">([\d,.]+)<',
+                r'instrument-price-last">([\d,.]+)<',
+                r'class="inline-block[^>]*>([\d,.]+)</span>'
+            ]
+            for p in patterns:
+                match = re.search(p, resp.text)
+                if match:
+                    val = float(match.group(1).replace(',', ''))
+                    return val
     except Exception as e:
-        print(f"Fireant Error: {e}")
-    return res
+        print(f"Investing VN10Y Error: {e}")
+    return np.nan
+
+# Removed fetch_investing_china_pmi and fetch_te_china_pmi as China PMI is now manual entry.
 
 def fetch_yf_data(date_obj=None):
     print(f"Fetching YFinance data{' for ' + date_obj.strftime('%Y-%m-%d') if date_obj else ''}...")
@@ -154,7 +151,7 @@ def fetch_yf_data(date_obj=None):
     return res
 
 def fetch_tv_data(date_obj=None):
-    print(f"Fetching TradingView data (VN10Y, USDT.D, China PMI, EIA, Core PCE)...")
+    print(f"Fetching TradingView data (VN10Y, USDT.D, EIA, Core PCE)...")
     res = {"VN10Y (%)": np.nan, "USDT.D": np.nan, "EIA Inventories (USDm)": np.nan, "Core PCE (%)": np.nan}
     try:
         tv = TvDatafeed()
@@ -183,6 +180,11 @@ def fetch_tv_data(date_obj=None):
             except: pass
     except Exception as e:
         print(f"TV data error: {e}")
+    
+    # Fallback for critical missing data
+    if pd.isna(res.get("VN10Y (%)")):
+        res["VN10Y (%)"] = fetch_investing_vn10y()
+        
     return res
 
 def fetch_vcb_rate(date_obj=None):
@@ -219,40 +221,7 @@ def fetch_vnibor(date_obj=None):
         print(f"VNIBOR error: {e}")
     return res
 
-def fetch_coinglass_etf():
-    print("Fetching Coinglass ETF data...")
-    res = {}
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get("https://www.coinglass.com/etf/bitcoin")
-        wait = WebDriverWait(driver, 30)
-        rows = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "tr.ant-table-row")))
-        for row in rows:
-            try:
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) >= 10:
-                    date_str_raw = cells[0].text.strip()
-                    total_str = cells[9].text.strip()
-                    dt = datetime.datetime.strptime(date_str_raw, "%Y-%m-%d")
-                    target_dt_str = dt.strftime("%d/%m/%Y")
-                    val = 0.0
-                    total_str = total_str.replace('+', '').replace(',', '')
-                    if 'K' in total_str:
-                        val = float(total_str.replace('K', '')) * 1000
-                    elif 'M' in total_str:
-                        val = float(total_str.replace('M', '')) * 1000000
-                    else:
-                        val = float(total_str)
-                    res[target_dt_str] = round(val, 2)
-            except: pass
-        driver.quit()
-    except Exception as e:
-        print(f"Coinglass error: {e}")
-    return res
+# Removed fetch_coinglass_etf as BTC ETF is now manual entry.
 
 def run_tracker(output_path=None):
     output_dir, file_path = get_config()
@@ -269,9 +238,8 @@ def run_tracker(output_path=None):
     df = initialize_df(file_path, cols)
     df = apply_overrides(df)
     
-    coinglass_data = fetch_coinglass_etf()
-    vnd_foreign = fetch_vndirect_foreign()
-    
+    # Shared values for indicators that don't change every day (PCE)
+    shared_indicators = {"Core PCE (%)": np.nan}
     today = datetime.datetime.now().date()
     start_backfill = today - datetime.timedelta(days=14)
     target_dates = pd.date_range(start=start_backfill, end=today).date.tolist()
@@ -283,8 +251,12 @@ def run_tracker(output_path=None):
         needs_update = False
         if target_dt in df.index:
             row = df.loc[target_dt]
-            if pd.isna(row.get('DXY')) or pd.isna(row.get('BTC')):
-                needs_update = True
+            # Update if any of the automated indicators are missing
+            critical_cols = ['DXY', 'BTC', 'VN10Y (%)']
+            for col in critical_cols:
+                if col in row and (pd.isna(row[col]) or row[col] == ""):
+                    needs_update = True
+                    break
         else:
             needs_update = True
             
@@ -293,21 +265,16 @@ def run_tracker(output_path=None):
             updates = fetch_yf_data(target_date if target_date != today else None)
             updates.update(fetch_tv_data(target_date if target_date != today else None))
             
+            # Update shared indicators if found
+            for k in shared_indicators:
+                if not pd.isna(updates.get(k)):
+                    shared_indicators[k] = updates[k]
+                elif not pd.isna(shared_indicators[k]):
+                    updates[k] = shared_indicators[k]
+                    
             if target_date == today:
                 updates.update(fetch_vcb_rate())
                 updates.update(fetch_vnibor())
-                
-            # Use dbnomics for China PMI
-            if 'pmi_val' not in locals():
-                rpmi = fetch_china_pmi()
-                pmi_val = rpmi.get("China PMI", np.nan)
-            updates["China PMI"] = pmi_val
-            
-            if dt_str in coinglass_data:
-                updates["US Spot ETF Net Inflow (BTC)"] = coinglass_data[dt_str]
-                
-            if dt_str in vnd_foreign:
-                updates["KHỐI NGOẠI MUA BÁN RÒNG CK phiên hôm qua (tỷ)"] = vnd_foreign[dt_str]
                 
             # Apply updates
             if target_dt not in df.index:
